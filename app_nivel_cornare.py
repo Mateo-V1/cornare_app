@@ -1,26 +1,4 @@
-"""
-App básica de Streamlit — Nivel de ríos/quebradas (CORNARE / MARCO)
---------------------------------------------------------------------
-Cada estudiante debe cambiar, como mínimo, el código de la estación
-en el sidebar. Los valores de fecha y calidad también son ajustables.
 
-NOVEDADES DE ESTA VERSIÓN
---------------------------------------------------------------------
-- Se extraen y muestran el NOMBRE de la estación, su UBICACIÓN y TIPO
-  (si la API los trae en la respuesta), igual que ya se hacía con
-  lat/lon: se prueban varias "llaves candidatas" y si no aparece
-  ninguna, se avisa en pantalla en vez de fallar en silencio.
-- Se extraen los UMBRALES de alerta (seguro / amarilla / naranja / roja)
-  cuando la API los entrega, y se calcula un ESTADO de alerta actual
-  comparando el último nivel contra esos umbrales.
-- Se agregan métricas de "Nivel actual" y "Máximo del período".
-- Se agrega (opcional) una segunda consulta a un endpoint de
-  precipitación, con el mismo esquema robusto: si no existe o falla,
-  la app simplemente no muestra esa sección, sin romperse.
-
-Para correrla:
-    streamlit run app_nivel_cornare.py
-"""
 
 import requests
 import pandas as pd
