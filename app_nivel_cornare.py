@@ -1,17 +1,3 @@
-"""
-App de Streamlit — Nivel del Río San Carlos, estación CORNARE Cód. 28
---------------------------------------------------------------------
-Esta app está fijada a UNA sola estación: "San Carlos, Río San Carlos"
-(Red Agua, Cód. 28), Puente Entrada San Carlos. Ya no hay selector de
-otra estación ni valores por defecto genéricos — todo lo que se ve en
-pantalla corresponde a esta estación.
-
-Solo se ajustan el rango de fechas y la calidad de los datos.
-
-Para correrla:
-    streamlit run app_nivel_cornare.py
-"""
-
 import requests
 import pandas as pd
 import streamlit as st
@@ -33,20 +19,32 @@ LON_ESTACION = -74.9971
 # Umbrales de alerta (cm). MARCO los muestra como líneas de color en la
 # gráfica "Nivel corriente de agua" (Amarilla / Naranja / Roja) pero no
 # vienen en la respuesta JSON de /nivel. Si logras identificar los
-# valores exactos (por ejemplo revisando la pestaña Red del navegador
-# al cargar la gráfica en MARCO), reemplázalos aquí; mientras tanto
-# quedan en None y la app simplemente no dibuja esas líneas.
+# valores exactos, reemplázalos aquí y se activa el semáforo solo.
 UMBRAL_AMARILLA = None
 UMBRAL_NARANJA = None
 UMBRAL_ROJA = None
+
+# --------------------------------------------------------------
+# FOTOS DE LA ESTACIÓN / CAUCE
+# --------------------------------------------------------------
+# Agrega aquí las fotos que quieras mostrar (como en el botón
+# "Ver imágenes" de MARCO). Cada elemento puede ser:
+#   - la ruta a un archivo local, por ejemplo "fotos/estacion_28.jpg"
+#     (coloca los archivos en una carpeta "fotos/" junto a este script)
+#   - o una URL de imagen, por ejemplo "https://.../estacion_28.jpg"
+# Puedes dejar solo la ruta, o (ruta, descripción) para mostrar un pie
+# de foto.
+FOTOS_ESTACION = [
+    # "fotos/estacion_28_sensor.jpg",
+    # ("fotos/estacion_28_cauce.jpg", "Sección del cauce, Puente Entrada San Carlos"),
+    # "https://ejemplo.com/estacion_28.jpg",
+]
 
 API_BASE_URL = "https://marco.cornare.gov.co/api/v1/estaciones"
 LLAVE_FECHA = "level_date"
 LLAVE_VALOR = "level"
 
-# Endpoint opcional de precipitación (mismo patrón que "nivel"). MARCO
-# muestra un panel de precipitación junto al de nivel para esta misma
-# estación; si tu API usa otro nombre de recurso, cámbialo aquí.
+# Endpoint opcional de precipitación (mismo patrón que "nivel").
 ENDPOINT_PRECIPITACION = "precipitacion"
 
 st.set_page_config(
@@ -113,7 +111,7 @@ def calcular_estado_alerta(nivel_actual, amarilla, naranja, roja):
         return "Naranja", "🟠"
     if amarilla is not None and nivel_actual >= amarilla:
         return "Amarilla", "🟡"
-    if amarilla is not None:  # hay al menos un umbral definido y no se superó
+    if amarilla is not None:
         return "Segura", "🟢"
     return "Umbrales no definidos", "⚪"
 
@@ -144,6 +142,29 @@ def calcular_indice_calidad(df):
     return round(indice, 1), int(huecos), int(es_outlier.sum())
 
 
+def mostrar_galeria_fotos(fotos):
+    """Muestra las fotos de FOTOS_ESTACION en una galería de 3 columnas."""
+    if not fotos:
+        st.caption(
+            "Aún no has agregado fotos. Edita la lista `FOTOS_ESTACION` al inicio del "
+            "archivo con rutas locales (ej. `fotos/estacion_28.jpg`) o URLs de imágenes."
+        )
+        return
+
+    columnas = st.columns(3)
+    for i, foto in enumerate(fotos):
+        if isinstance(foto, (tuple, list)):
+            ruta, descripcion = foto[0], foto[1] if len(foto) > 1 else None
+        else:
+            ruta, descripcion = foto, None
+
+        with columnas[i % 3]:
+            try:
+                st.image(ruta, caption=descripcion, use_container_width=True)
+            except Exception:
+                st.caption(f"No se pudo cargar: {ruta}")
+
+
 # ------------------------------------------------------------------
 # Sidebar — solo fechas y calidad; la estación ya está fija
 # ------------------------------------------------------------------
@@ -154,7 +175,6 @@ fecha_desde = st.sidebar.date_input("Desde", pd.to_datetime("2026-08-23")).strft
 fecha_hasta = st.sidebar.date_input("Hasta", pd.to_datetime("2026-08-30")).strftime("%Y-%m-%d")
 calidad = st.sidebar.selectbox("Calidad", [1, 0], index=0, help="1 = solo datos validados")
 incluir_precipitacion = st.sidebar.checkbox("Incluir precipitación", value=True)
-consultar = st.sidebar.button("🔍 Consultar", type="primary")
 
 st.title(f"🌊 {NOMBRE_ESTACION}")
 st.caption(
@@ -163,126 +183,124 @@ st.caption(
 )
 
 # ------------------------------------------------------------------
-# Consulta y procesamiento
+# Carga automática de datos (sin botón de búsqueda): se ejecuta cada
+# vez que se abre la app o se cambia algún parámetro del sidebar.
 # ------------------------------------------------------------------
-if consultar:
-    with st.spinner("Consultando la API de CORNARE..."):
-        datos_crudos, error = obtener_serie_nivel(fecha_desde, fecha_hasta, calidad)
+with st.spinner("Consultando la API de CORNARE..."):
+    datos_crudos, error = obtener_serie_nivel(fecha_desde, fecha_hasta, calidad)
 
-    if error:
-        st.error(f"❌ {error}")
-    else:
-        registros = obtener_todas_las_paginas(datos_crudos)
-
-        if not registros:
-            st.warning("No hay registros para este rango de fechas. Prueba otro rango.")
-        else:
-            df = construir_dataframe(registros, LLAVE_FECHA, LLAVE_VALOR, "nivel")
-            indice_calidad, huecos, n_outliers = calcular_indice_calidad(df)
-
-            # Nivel actual y máximo: la API de /nivel ya los trae listos.
-            # Si por algún motivo no vinieran, se calculan desde el DataFrame.
-            nivel_actual = datos_crudos.get("current_level")
-            fecha_ultimo = datos_crudos.get("current_level_date")
-            nivel_maximo = datos_crudos.get("max_level")
-            fecha_maximo = datos_crudos.get("max_level_date")
-
-            if nivel_actual is None:
-                nivel_actual = float(df["nivel"].iloc[-1])
-                fecha_ultimo = df["fecha"].iloc[-1]
-            if nivel_maximo is None:
-                nivel_maximo = float(df["nivel"].max())
-                fecha_maximo = df.loc[df["nivel"].idxmax(), "fecha"]
-
-            nivel_actual = float(nivel_actual)
-            nivel_maximo = float(nivel_maximo)
-
-            etiqueta_alerta, icono_alerta = calcular_estado_alerta(
-                nivel_actual, UMBRAL_AMARILLA, UMBRAL_NARANJA, UMBRAL_ROJA
-            )
-
-            # --- Métricas principales ---
-            col1, col2, col3, col4, col5 = st.columns(5)
-            col1.metric("Lecturas", len(df))
-            col2.metric("Nivel actual (cm)", f"{nivel_actual:.1f}", help=f"Último registro: {fecha_ultimo}")
-            col3.metric("Máximo del período (cm)", f"{nivel_maximo:.1f}", help=f"Registrado el: {fecha_maximo}")
-            col4.metric("Índice de calidad", f"{indice_calidad} / 100")
-            col5.metric("Outliers detectados", n_outliers)
-
-            # --- Estado de alerta ---
-            st.markdown(f"### Estado actual: {icono_alerta} **{etiqueta_alerta}**")
-            if UMBRAL_AMARILLA or UMBRAL_NARANJA or UMBRAL_ROJA:
-                cols_umbral = st.columns(3)
-                cols_umbral[0].metric("Umbral amarilla", UMBRAL_AMARILLA if UMBRAL_AMARILLA else "—")
-                cols_umbral[1].metric("Umbral naranja", UMBRAL_NARANJA if UMBRAL_NARANJA else "—")
-                cols_umbral[2].metric("Umbral roja", UMBRAL_ROJA if UMBRAL_ROJA else "—")
-            else:
-                st.caption(
-                    "Los umbrales de alerta (Amarilla/Naranja/Roja) no vienen en la respuesta de "
-                    "/nivel. Complétalos en las constantes `UMBRAL_AMARILLA/NARANJA/ROJA` si los "
-                    "encuentras, y aquí se activará el semáforo automáticamente."
-                )
-
-            # --- Gráfico de la serie de nivel, con líneas de umbral si existen ---
-            st.subheader("Nivel corriente de agua")
-            df_grafico = df.set_index("fecha")[["nivel"]].copy()
-            if UMBRAL_AMARILLA:
-                df_grafico["Umbral amarilla"] = UMBRAL_AMARILLA
-            if UMBRAL_NARANJA:
-                df_grafico["Umbral naranja"] = UMBRAL_NARANJA
-            if UMBRAL_ROJA:
-                df_grafico["Umbral roja"] = UMBRAL_ROJA
-            st.line_chart(df_grafico)
-
-            # --- Precipitación (opcional) ---
-            if incluir_precipitacion:
-                datos_precip, error_precip = obtener_serie(
-                    ENDPOINT_PRECIPITACION, fecha_desde, fecha_hasta, calidad
-                )
-                if datos_precip and not error_precip:
-                    registros_precip = obtener_todas_las_paginas(datos_precip)
-                    if registros_precip:
-                        try:
-                            df_precip = construir_dataframe(
-                                registros_precip, LLAVE_FECHA, LLAVE_VALOR, "precipitacion"
-                            )
-                            if not df_precip.empty:
-                                st.subheader("Precipitación")
-                                st.bar_chart(df_precip.set_index("fecha")["precipitacion"])
-                        except Exception:
-                            st.caption(
-                                "No se pudo interpretar la respuesta de precipitación con el "
-                                "esquema de llaves actual (LLAVE_FECHA / LLAVE_VALOR)."
-                            )
-                # Si el endpoint de precipitación no existe o falla, no se muestra
-                # nada — no se interrumpe la app por una funcionalidad opcional.
-
-            # --- Mapa de la estación ---
-            st.subheader("Ubicación de la estación")
-            st.map(pd.DataFrame({"lat": [LAT_ESTACION], "lon": [LON_ESTACION]}), zoom=13)
-
-            # --- Detalle de calidad ---
-            with st.expander("Detalle del índice de calidad"):
-                st.write(f"- Huecos de reporte detectados: **{huecos}**")
-                st.write(f"- Outliers (IQR + nivel negativo): **{n_outliers}** de {len(df)} lecturas")
-                st.write("El índice combina completitud de la serie (70%) y proporción de datos sin outliers (30%).")
-
-            # --- Metadatos crudos (para depurar qué trae la API) ---
-            with st.expander("Ver metadatos crudos de /nivel (depuración)"):
-                claves_raiz = {k: v for k, v in datos_crudos.items() if k not in ("values", "next")} \
-                    if isinstance(datos_crudos, dict) else {}
-                st.json(claves_raiz if claves_raiz else {"info": "Sin llaves raíz adicionales."})
-
-            # --- Tabla y descarga ---
-            with st.expander("Ver datos crudos de nivel"):
-                st.dataframe(df, use_container_width=True)
-
-            csv = df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "⬇️ Descargar CSV",
-                csv,
-                file_name=f"nivel_estacion_{CODIGO_ESTACION}.csv",
-                mime="text/csv",
-            )
+if error:
+    st.error(f"❌ {error}")
 else:
-    st.info("Ajusta el rango de fechas en el sidebar y presiona **Consultar**.")
+    registros = obtener_todas_las_paginas(datos_crudos)
+
+    if not registros:
+        st.warning("No hay registros para este rango de fechas. Prueba otro rango en el sidebar.")
+    else:
+        df = construir_dataframe(registros, LLAVE_FECHA, LLAVE_VALOR, "nivel")
+        indice_calidad, huecos, n_outliers = calcular_indice_calidad(df)
+
+        # Nivel actual y máximo: la API de /nivel ya los trae listos.
+        nivel_actual = datos_crudos.get("current_level")
+        fecha_ultimo = datos_crudos.get("current_level_date")
+        nivel_maximo = datos_crudos.get("max_level")
+        fecha_maximo = datos_crudos.get("max_level_date")
+
+        if nivel_actual is None:
+            nivel_actual = float(df["nivel"].iloc[-1])
+            fecha_ultimo = df["fecha"].iloc[-1]
+        if nivel_maximo is None:
+            nivel_maximo = float(df["nivel"].max())
+            fecha_maximo = df.loc[df["nivel"].idxmax(), "fecha"]
+
+        nivel_actual = float(nivel_actual)
+        nivel_maximo = float(nivel_maximo)
+
+        etiqueta_alerta, icono_alerta = calcular_estado_alerta(
+            nivel_actual, UMBRAL_AMARILLA, UMBRAL_NARANJA, UMBRAL_ROJA
+        )
+
+        # --- Métricas principales ---
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("Lecturas", len(df))
+        col2.metric("Nivel actual (cm)", f"{nivel_actual:.1f}", help=f"Último registro: {fecha_ultimo}")
+        col3.metric("Máximo del período (cm)", f"{nivel_maximo:.1f}", help=f"Registrado el: {fecha_maximo}")
+        col4.metric("Índice de calidad", f"{indice_calidad} / 100")
+        col5.metric("Outliers detectados", n_outliers)
+
+        # --- Estado de alerta ---
+        st.markdown(f"### Estado actual: {icono_alerta} **{etiqueta_alerta}**")
+        if UMBRAL_AMARILLA or UMBRAL_NARANJA or UMBRAL_ROJA:
+            cols_umbral = st.columns(3)
+            cols_umbral[0].metric("Umbral amarilla", UMBRAL_AMARILLA if UMBRAL_AMARILLA else "—")
+            cols_umbral[1].metric("Umbral naranja", UMBRAL_NARANJA if UMBRAL_NARANJA else "—")
+            cols_umbral[2].metric("Umbral roja", UMBRAL_ROJA if UMBRAL_ROJA else "—")
+        else:
+            st.caption(
+                "Los umbrales de alerta (Amarilla/Naranja/Roja) no vienen en la respuesta de "
+                "/nivel. Complétalos en `UMBRAL_AMARILLA/NARANJA/ROJA` si los encuentras."
+            )
+
+        # --- Gráfico de la serie de nivel, con líneas de umbral si existen ---
+        st.subheader("Nivel corriente de agua")
+        df_grafico = df.set_index("fecha")[["nivel"]].copy()
+        if UMBRAL_AMARILLA:
+            df_grafico["Umbral amarilla"] = UMBRAL_AMARILLA
+        if UMBRAL_NARANJA:
+            df_grafico["Umbral naranja"] = UMBRAL_NARANJA
+        if UMBRAL_ROJA:
+            df_grafico["Umbral roja"] = UMBRAL_ROJA
+        st.line_chart(df_grafico)
+
+        # --- Precipitación (opcional) ---
+        if incluir_precipitacion:
+            datos_precip, error_precip = obtener_serie(
+                ENDPOINT_PRECIPITACION, fecha_desde, fecha_hasta, calidad
+            )
+            if datos_precip and not error_precip:
+                registros_precip = obtener_todas_las_paginas(datos_precip)
+                if registros_precip:
+                    try:
+                        df_precip = construir_dataframe(
+                            registros_precip, LLAVE_FECHA, LLAVE_VALOR, "precipitacion"
+                        )
+                        if not df_precip.empty:
+                            st.subheader("Precipitación")
+                            st.bar_chart(df_precip.set_index("fecha")["precipitacion"])
+                    except Exception:
+                        st.caption(
+                            "No se pudo interpretar la respuesta de precipitación con el "
+                            "esquema de llaves actual (LLAVE_FECHA / LLAVE_VALOR)."
+                        )
+
+        # --- Mapa de la estación ---
+        st.subheader("Ubicación de la estación")
+        st.map(pd.DataFrame({"lat": [LAT_ESTACION], "lon": [LON_ESTACION]}), zoom=13)
+
+        # --- Fotos de la estación ---
+        st.subheader("📷 Fotos de la estación")
+        mostrar_galeria_fotos(FOTOS_ESTACION)
+
+        # --- Detalle de calidad ---
+        with st.expander("Detalle del índice de calidad"):
+            st.write(f"- Huecos de reporte detectados: **{huecos}**")
+            st.write(f"- Outliers (IQR + nivel negativo): **{n_outliers}** de {len(df)} lecturas")
+            st.write("El índice combina completitud de la serie (70%) y proporción de datos sin outliers (30%).")
+
+        # --- Metadatos crudos (para depurar qué trae la API) ---
+        with st.expander("Ver metadatos crudos de /nivel (depuración)"):
+            claves_raiz = {k: v for k, v in datos_crudos.items() if k not in ("values", "next")} \
+                if isinstance(datos_crudos, dict) else {}
+            st.json(claves_raiz if claves_raiz else {"info": "Sin llaves raíz adicionales."})
+
+        # --- Tabla y descarga ---
+        with st.expander("Ver datos crudos de nivel"):
+            st.dataframe(df, use_container_width=True)
+
+        csv = df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Descargar CSV",
+            csv,
+            file_name=f"nivel_estacion_{CODIGO_ESTACION}.csv",
+            mime="text/csv",
+        )
