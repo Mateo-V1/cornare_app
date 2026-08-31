@@ -1,3 +1,6 @@
+
+from datetime import datetime, timedelta
+
 import requests
 import pandas as pd
 import streamlit as st
@@ -16,6 +19,13 @@ UBICACION_ESTACION = "San Carlos, Río San Carlos, Puente Entrada San Carlos"
 LAT_ESTACION = 6.1852
 LON_ESTACION = -74.9971
 
+# Ventana de consulta fija (últimos 7 días, calculados al momento de abrir la app)
+DIAS_A_CONSULTAR = 7
+FECHA_HASTA = datetime.now().strftime("%Y-%m-%d")
+FECHA_DESDE = (datetime.now() - timedelta(days=DIAS_A_CONSULTAR)).strftime("%Y-%m-%d")
+CALIDAD = 1  # 1 = solo datos validados
+INCLUIR_PRECIPITACION = True
+
 # Umbrales de alerta (cm). MARCO los muestra como líneas de color en la
 # gráfica "Nivel corriente de agua" (Amarilla / Naranja / Roja) pero no
 # vienen en la respuesta JSON de /nivel. Si logras identificar los
@@ -24,27 +34,9 @@ UMBRAL_AMARILLA = None
 UMBRAL_NARANJA = None
 UMBRAL_ROJA = None
 
-# --------------------------------------------------------------
-# FOTOS DE LA ESTACIÓN / CAUCE
-# --------------------------------------------------------------
-# Agrega aquí las fotos que quieras mostrar (como en el botón
-# "Ver imágenes" de MARCO). Cada elemento puede ser:
-#   - la ruta a un archivo local, por ejemplo "fotos/estacion_28.jpg"
-#     (coloca los archivos en una carpeta "fotos/" junto a este script)
-#   - o una URL de imagen, por ejemplo "https://.../estacion_28.jpg"
-# Puedes dejar solo la ruta, o (ruta, descripción) para mostrar un pie
-# de foto.
-FOTOS_ESTACION = [
-    # "fotos/estacion_28_sensor.jpg",
-    # ("fotos/estacion_28_cauce.jpg", "Sección del cauce, Puente Entrada San Carlos"),
-    # "https://ejemplo.com/estacion_28.jpg",
-]
-
 API_BASE_URL = "https://marco.cornare.gov.co/api/v1/estaciones"
 LLAVE_FECHA = "level_date"
 LLAVE_VALOR = "level"
-
-# Endpoint opcional de precipitación (mismo patrón que "nivel").
 ENDPOINT_PRECIPITACION = "precipitacion"
 
 st.set_page_config(
@@ -142,52 +134,21 @@ def calcular_indice_calidad(df):
     return round(indice, 1), int(huecos), int(es_outlier.sum())
 
 
-def mostrar_galeria_fotos(fotos):
-    """Muestra las fotos de FOTOS_ESTACION en una galería de 3 columnas."""
-    if not fotos:
-        st.caption(
-            "Aún no has agregado fotos. Edita la lista `FOTOS_ESTACION` al inicio del "
-            "archivo con rutas locales (ej. `fotos/estacion_28.jpg`) o URLs de imágenes."
-        )
-        return
-
-    columnas = st.columns(3)
-    for i, foto in enumerate(fotos):
-        if isinstance(foto, (tuple, list)):
-            ruta, descripcion = foto[0], foto[1] if len(foto) > 1 else None
-        else:
-            ruta, descripcion = foto, None
-
-        with columnas[i % 3]:
-            try:
-                st.image(ruta, caption=descripcion, use_container_width=True)
-            except Exception:
-                st.caption(f"No se pudo cargar: {ruta}")
-
-
 # ------------------------------------------------------------------
-# Sidebar — solo fechas y calidad; la estación ya está fija
+# Encabezado — sin sidebar de parámetros de búsqueda
 # ------------------------------------------------------------------
-st.sidebar.header("Parámetros de consulta")
-st.sidebar.markdown(f"**Estación:** {NOMBRE_ESTACION}  \n**Código:** {CODIGO_ESTACION} · {TIPO_ESTACION}")
-nombre_estudiante = st.sidebar.text_input("Nombre del estudiante", "Tu Nombre Aquí")
-fecha_desde = st.sidebar.date_input("Desde", pd.to_datetime("2026-08-23")).strftime("%Y-%m-%d")
-fecha_hasta = st.sidebar.date_input("Hasta", pd.to_datetime("2026-08-30")).strftime("%Y-%m-%d")
-calidad = st.sidebar.selectbox("Calidad", [1, 0], index=0, help="1 = solo datos validados")
-incluir_precipitacion = st.sidebar.checkbox("Incluir precipitación", value=True)
-
 st.title(f"🌊 {NOMBRE_ESTACION}")
 st.caption(
-    f"Estudiante: **{nombre_estudiante}** · Código: **{CODIGO_ESTACION}** ({RED_ESTACION}) · "
-    f"Tipo: **{TIPO_ESTACION}** · Ubicación: **{UBICACION_ESTACION}**"
+    f"Código: **{CODIGO_ESTACION}** ({RED_ESTACION}) · Tipo: **{TIPO_ESTACION}** · "
+    f"Ubicación: **{UBICACION_ESTACION}**"
 )
+st.caption(f"Período consultado: **{FECHA_DESDE}** a **{FECHA_HASTA}** (últimos {DIAS_A_CONSULTAR} días)")
 
 # ------------------------------------------------------------------
-# Carga automática de datos (sin botón de búsqueda): se ejecuta cada
-# vez que se abre la app o se cambia algún parámetro del sidebar.
+# Carga automática de datos: sin botones ni parámetros que ajustar.
 # ------------------------------------------------------------------
 with st.spinner("Consultando la API de CORNARE..."):
-    datos_crudos, error = obtener_serie_nivel(fecha_desde, fecha_hasta, calidad)
+    datos_crudos, error = obtener_serie_nivel(FECHA_DESDE, FECHA_HASTA, CALIDAD)
 
 if error:
     st.error(f"❌ {error}")
@@ -195,7 +156,7 @@ else:
     registros = obtener_todas_las_paginas(datos_crudos)
 
     if not registros:
-        st.warning("No hay registros para este rango de fechas. Prueba otro rango en el sidebar.")
+        st.warning("No hay registros para los últimos días.")
     else:
         df = construir_dataframe(registros, LLAVE_FECHA, LLAVE_VALOR, "nivel")
         indice_calidad, huecos, n_outliers = calcular_indice_calidad(df)
@@ -252,10 +213,10 @@ else:
             df_grafico["Umbral roja"] = UMBRAL_ROJA
         st.line_chart(df_grafico)
 
-        # --- Precipitación (opcional) ---
-        if incluir_precipitacion:
+        # --- Precipitación ---
+        if INCLUIR_PRECIPITACION:
             datos_precip, error_precip = obtener_serie(
-                ENDPOINT_PRECIPITACION, fecha_desde, fecha_hasta, calidad
+                ENDPOINT_PRECIPITACION, FECHA_DESDE, FECHA_HASTA, CALIDAD
             )
             if datos_precip and not error_precip:
                 registros_precip = obtener_todas_las_paginas(datos_precip)
@@ -276,10 +237,6 @@ else:
         # --- Mapa de la estación ---
         st.subheader("Ubicación de la estación")
         st.map(pd.DataFrame({"lat": [LAT_ESTACION], "lon": [LON_ESTACION]}), zoom=13)
-
-        # --- Fotos de la estación ---
-        st.subheader("📷 Fotos de la estación")
-        mostrar_galeria_fotos(FOTOS_ESTACION)
 
         # --- Detalle de calidad ---
         with st.expander("Detalle del índice de calidad"):
