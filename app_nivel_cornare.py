@@ -1,5 +1,3 @@
-
-
 import requests
 import pandas as pd
 import numpy as np
@@ -64,6 +62,60 @@ def obtener_serie(codigo_estacion, recurso, desde, hasta, calidad=1, timeout=30)
 
 def obtener_serie_nivel(codigo_estacion, desde, hasta, calidad=1, timeout=30):
     return obtener_serie(codigo_estacion, "nivel", desde, hasta, calidad, timeout)
+
+
+def obtener_detalle_estacion(codigo_estacion, timeout=15):
+    """
+    El endpoint /nivel SOLO trae la serie + current_level/max_level — no trae
+    nombre, ubicación ni umbrales de alerta (confirmado inspeccionando la
+    respuesta real). Esos datos probablemente viven en un endpoint de
+    "detalle" o "catálogo" de estación, separado de la serie temporal.
+
+    Esta función prueba varias rutas comunes en APIs REST. Si ninguna
+    responde con datos útiles, devuelve (None, None) y la app lo indica
+    en pantalla en vez de inventar información.
+
+    Si encuentras la ruta correcta (por ejemplo abriendo las herramientas
+    de desarrollador del navegador en la página de MARCO y viendo qué
+    URL llama al cargar los datos de la estación), agrégala al inicio
+    de `posibles_urls` para que se use primero.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+    }
+    posibles_urls = [
+        f"{API_BASE_URL}/{codigo_estacion}",
+        f"{API_BASE_URL}/{codigo_estacion}/detalle",
+        f"{API_BASE_URL}/{codigo_estacion}/info",
+        f"{API_BASE_URL}",  # catálogo completo; se filtra por código abajo
+    ]
+    for url in posibles_urls:
+        try:
+            resp = requests.get(url, headers=headers, timeout=timeout, verify=False)
+        except requests.exceptions.RequestException:
+            continue
+        if resp.status_code != 200:
+            continue
+        try:
+            data = resp.json()
+        except ValueError:
+            continue
+
+        if isinstance(data, dict) and any(
+            k in data for k in CANDIDATOS_NOMBRE + CANDIDATOS_UBICACION + CANDIDATOS_LAT
+        ):
+            return data, url
+
+        if isinstance(data, list):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                codigo_item = item.get("code") or item.get("codigo") or item.get("id")
+                if codigo_item is not None and str(codigo_item) == str(codigo_estacion):
+                    return item, url
+
+    return None, None
 
 
 def obtener_todas_las_paginas(datos_json, timeout=30):
@@ -203,16 +255,36 @@ if consultar:
             st.warning("No hay registros para esta estación y rango de fechas. Prueba otro código u otro rango.")
         else:
             df = construir_dataframe(registros, LLAVE_FECHA, LLAVE_VALOR, "nivel")
-
-            lat, lon, coords_reales = detectar_coordenadas(datos_crudos)
-            nombre_est, ubicacion_est, tipo_est = detectar_metadatos_estacion(datos_crudos)
-            umbral_amarilla, umbral_naranja, umbral_roja = detectar_umbrales(datos_crudos)
             indice_calidad, huecos, n_outliers = calcular_indice_calidad(df)
 
-            nivel_actual = float(df["nivel"].iloc[-1])
-            fecha_ultimo = df["fecha"].iloc[-1]
-            nivel_maximo = float(df["nivel"].max())
-            fecha_maximo = df.loc[df["nivel"].idxmax(), "fecha"]
+            # --- Nivel actual y máximo: la API de /nivel ya los trae listos ---
+            # (current_level, current_level_date, max_level, max_level_date).
+            # Si por algún motivo no vinieran, se calculan desde el DataFrame
+            # como respaldo.
+            nivel_actual = datos_crudos.get("current_level")
+            fecha_ultimo = datos_crudos.get("current_level_date")
+            nivel_maximo = datos_crudos.get("max_level")
+            fecha_maximo = datos_crudos.get("max_level_date")
+
+            if nivel_actual is None:
+                nivel_actual = float(df["nivel"].iloc[-1])
+                fecha_ultimo = df["fecha"].iloc[-1]
+            if nivel_maximo is None:
+                nivel_maximo = float(df["nivel"].max())
+                fecha_maximo = df.loc[df["nivel"].idxmax(), "fecha"]
+
+            nivel_actual = float(nivel_actual)
+            nivel_maximo = float(nivel_maximo)
+
+            # --- Detalle de estación (nombre/ubicación/umbrales) ---
+            # Se busca en un endpoint aparte porque /nivel no lo trae.
+            with st.spinner("Buscando nombre, ubicación y umbrales de la estación..."):
+                detalle_estacion, url_detalle_usada = obtener_detalle_estacion(codigo_estacion)
+
+            lat, lon, coords_reales = detectar_coordenadas(detalle_estacion or {})
+            nombre_est, ubicacion_est, tipo_est = detectar_metadatos_estacion(detalle_estacion or {})
+            umbral_amarilla, umbral_naranja, umbral_roja = detectar_umbrales(detalle_estacion or {})
+
             etiqueta_alerta, icono_alerta = calcular_estado_alerta(
                 nivel_actual, umbral_amarilla, umbral_naranja, umbral_roja
             )
@@ -227,11 +299,19 @@ if consultar:
             info_bits.append(f"Código: **{codigo_estacion}**")
             st.caption(" · ".join(info_bits))
             if not nombre_est and not ubicacion_est:
-                st.caption(
-                    "La API no trajo nombre/ubicación de la estación con las llaves probadas. "
-                    "Revisa `datos_crudos` (por ejemplo con `st.json`) y ajusta "
-                    "`CANDIDATOS_NOMBRE` / `CANDIDATOS_UBICACION`."
-                )
+                if detalle_estacion:
+                    st.caption(
+                        f"Se encontró un endpoint de detalle ({url_detalle_usada}) pero no traía "
+                        "nombre/ubicación con las llaves probadas. Revisa el expander de depuración "
+                        "más abajo y ajusta `CANDIDATOS_NOMBRE` / `CANDIDATOS_UBICACION`."
+                    )
+                else:
+                    st.caption(
+                        "No se encontró un endpoint de detalle con nombre/ubicación de la estación "
+                        "(se probaron varias rutas comunes, sin éxito). Es posible que MARCO use una "
+                        "ruta distinta — revisa la pestaña Red del navegador en la página de la "
+                        "estación y agrégala en `obtener_detalle_estacion()`."
+                    )
 
             # --- Métricas principales ---
             col1, col2, col3, col4, col5 = st.columns(5)
@@ -312,11 +392,19 @@ if consultar:
                 st.write(f"- Outliers (IQR + nivel negativo): **{n_outliers}** de {len(df)} lecturas")
                 st.write("El índice combina completitud de la serie (70%) y proporción de datos sin outliers (30%).")
 
-            # --- Metadatos crudos (para depurar qué trae la API) ---
-            with st.expander("Ver metadatos crudos de la estación (depuración)"):
-                claves_raiz = {k: v for k, v in datos_crudos.items() if k != "values" and k != "next"} \
+            # --- Metadatos crudos (para depurar qué trae cada endpoint) ---
+            with st.expander("Ver metadatos crudos (depuración)"):
+                st.markdown(f"**Respuesta de `/{codigo_estacion}/nivel`** (solo llaves raíz, sin `values`/`next`):")
+                claves_raiz = {k: v for k, v in datos_crudos.items() if k not in ("values", "next")} \
                     if isinstance(datos_crudos, dict) else {}
-                st.json(claves_raiz if claves_raiz else {"info": "Sin llaves raíz adicionales en la respuesta."})
+                st.json(claves_raiz if claves_raiz else {"info": "Sin llaves raíz adicionales."})
+
+                st.markdown("**Respuesta del endpoint de detalle de estación:**")
+                if detalle_estacion:
+                    st.caption(f"Obtenida desde: `{url_detalle_usada}`")
+                    st.json(detalle_estacion)
+                else:
+                    st.caption("Ninguna de las rutas probadas devolvió datos de detalle.")
 
             # --- Tabla y descarga ---
             with st.expander("Ver datos crudos de nivel"):
